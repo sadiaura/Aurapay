@@ -398,7 +398,6 @@ async def dep_casino(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def dep_id(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["dep_id"] = update.message.text
-    await safe_delete(update.message.bot, update.effective_user.id, update.message.message_id)
     msg = await update.message.reply_text(
         "🚀 Введите сумму пополнения:\n"
         "📌 Min: 100\n"
@@ -422,7 +421,6 @@ async def dep_amount_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def dep_amount_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text.strip()
-    await safe_delete(update.message.bot, update.effective_user.id, update.message.message_id)
     if not txt.isdigit():
         bad = await update.message.reply_text("⚠️ Введите число.")
         await asyncio.sleep(2)
@@ -486,7 +484,6 @@ async def dep_bank_alert(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return DEP_BANK
 
 async def dep_bank_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await safe_delete(update.message.bot, update.effective_user.id, update.message.message_id)
     hint = await update.message.reply_text("📷 Оплатите по QR и отправьте фото чека об оплате.")
     await asyncio.sleep(4)
     await safe_delete(hint.bot, update.effective_user.id, hint.message_id)
@@ -524,7 +521,6 @@ async def dep_receipt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     amount      = ctx.user_data.get("dep_amount", "")
 
     await cleanup_msgs(ctx, uid)
-    await safe_delete(update.message.bot, uid, update.message.message_id)
 
     pending_requests[uid] = {
         "type":     "deposit",
@@ -627,20 +623,17 @@ async def wd_bank(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def wd_phone(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["wd_phone"] = update.message.text
-    await safe_delete(update.message.bot, update.effective_user.id, update.message.message_id)
     msg = await update.message.reply_text("📷 Отправьте фото QR кода от банка:")
     track(ctx, msg.message_id)
     return WD_QR
 
 async def wd_qr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message.photo:
-        await safe_delete(update.message.bot, update.effective_user.id, update.message.message_id)
         bad = await update.message.reply_text("📷 Пожалуйста, отправьте именно фото QR кода.")
         await asyncio.sleep(3)
         await safe_delete(bad.bot, update.effective_user.id, bad.message_id)
         return WD_QR
     ctx.user_data["wd_qr"] = update.message.photo[-1].file_id
-    await safe_delete(update.message.bot, update.effective_user.id, update.message.message_id)
     casino = ctx.user_data.get("wd_casino", "")
     msg = await update.message.reply_text(
         "▶▶▶ Заходим 👇\n"
@@ -654,7 +647,6 @@ async def wd_qr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def wd_cid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["wd_cid"] = update.message.text
-    await safe_delete(update.message.bot, update.effective_user.id, update.message.message_id)
     msg = await update.message.reply_text("🔑 Введите код с сайта казино:")
     track(ctx, msg.message_id)
     return WD_CODE
@@ -668,7 +660,6 @@ async def wd_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cid    = ctx.user_data.get("wd_cid", "")
     qr_fid = ctx.user_data.get("wd_qr", "")
 
-    await safe_delete(update.message.bot, uid, update.message.message_id)
 
     check = await update.message.reply_text("🔍 Проверяю код...")
     await asyncio.sleep(random.uniform(1, 2))
