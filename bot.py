@@ -148,7 +148,7 @@ def build_status_msg(uid: int, status: str, elapsed_sec: int) -> str:
     ]
 
     if status == "declined":
-        lines.append("\nЕсли есть вопросы — @aurapay_support_bot")
+        lines.append("\nЕсли есть вопросы — @Aurapay_supportbot")
 
     return "\n".join(lines)
 
@@ -186,7 +186,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "⚡ Авто-пополнение: 0%\n"
         "⚡ Авто-вывод: 0%\n"
         "🌟 Работаем: 24/7\n\n"
-        "💬 Служба поддержки: @aurapay_support_bot",
+        "💬 Служба поддержки: @Aurapay_supportbot",
         reply_markup=main_kb()
     )
     return ConversationHandler.END
@@ -337,7 +337,7 @@ async def dep_receipt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "✅ <b>Заявка на пополнение отправлена!</b>\n\n"
         "⏳ Ожидайте — оператор обработает её в ближайшее время.\n"
-        "💬 Поддержка: @aurapay_support_bot",
+        "💬 Поддержка: @Aurapay_supportbot",
         parse_mode="HTML",
         reply_markup=main_kb()
     )
@@ -441,7 +441,7 @@ async def wd_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "✅ <b>Заявка на вывод отправлена!</b>\n\n"
         "⏳ Ожидайте — оператор обработает её в ближайшее время.\n"
-        "💬 Поддержка: @aurapay_support_bot",
+        "💬 Поддержка: @Aurapay_supportbot",
         parse_mode="HTML",
         reply_markup=main_kb()
     )
