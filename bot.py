@@ -157,7 +157,7 @@ def build_status_msg(uid: int, status: str, elapsed_sec: int) -> str:
         f"📋 <b>Статус:</b> {status_line}",
     ]
     if status == "declined":
-        lines.append("\nЕсли есть вопросы — @Aurapay_supportbot")
+        lines.append("\n💬 Поддержка: @Aurapay_supportbot")
     return "\n".join(lines)
 
 async def notify_admin(app, text, uid, photo=None):
@@ -308,7 +308,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "⚡ Авто-пополнение: 0%\n"
         "⚡ Авто-вывод: 0%\n"
         "🌟 Работаем: 24/7\n\n"
-        "💬 Служба поддержки: @Aurapay_supportbot",
+        "💬 Поддержка: @Aurapay_supportbot",
         reply_markup=main_kb()
     )
     return ConversationHandler.END
