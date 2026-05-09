@@ -29,7 +29,7 @@ pending_qr    = None  # file_id QR
     ADM_QR,
 ) = range(10)
 
-# ── главная клавиатура (синие кнопки через ReplyKeyboard) ──────────────────
+# ── главная клавиатура ─────────────────────────────────────────────────────
 def main_kb():
     return ReplyKeyboardMarkup(
         [[KeyboardButton("💰 Пополнить"), KeyboardButton("💸 Вывести")],
@@ -58,7 +58,6 @@ def amount_ikb():
 
 # ── банки пополнения (недоступны) ──────────────────────────────────────────
 def dep_bank_payment_ikb():
-    """Банки показываются ПОСЛЕ QR — для выбора способа оплаты (все недоступны)."""
     banks = ["O!Bank", "MBank", "Optima Bank", "Demir Bank", "Bakai Bank", "MegaPay"]
     rows = []
     for i in range(0, len(banks), 2):
@@ -89,10 +88,24 @@ def lang_ikb():
     ])
 
 # ── админ кнопки под заявкой ───────────────────────────────────────────────
-def admin_ikb(uid):
+def admin_ikb(uid, status=None):
+    """
+    status=None       — обычные кнопки (новая заявка)
+    status='approved' — показывает ✅ Одобрено
+    status='declined' — показывает ❌ Отклонено
+    """
+    if status == "approved":
+        top_row = [InlineKeyboardButton("✅ ОДОБРЕНО", callback_data="noop")]
+    elif status == "declined":
+        top_row = [InlineKeyboardButton("❌ ОТКЛОНЕНО", callback_data="noop")]
+    else:
+        top_row = [
+            InlineKeyboardButton("✅ Одобрить",  callback_data=f"approve_{uid}"),
+            InlineKeyboardButton("❌ Отклонить", callback_data=f"decline_{uid}"),
+        ]
+
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Одобрить",       callback_data=f"approve_{uid}"),
-         InlineKeyboardButton("❌ Отклонить",      callback_data=f"decline_{uid}")],
+        top_row,
         [InlineKeyboardButton("✍️ Написать",       callback_data=f"awrite_{uid}"),
          InlineKeyboardButton("🚫 Заблокировать",  callback_data=f"ablock_{uid}")],
         [InlineKeyboardButton("🔓 Разблокировать", callback_data=f"aunblock_{uid}")],
@@ -104,13 +117,17 @@ async def notify_admin(app, text, uid, photo=None):
         return
     try:
         if photo:
-            await app.bot.send_photo(ADMIN_CHAT_ID, photo=photo,
-                                     caption=text, reply_markup=admin_ikb(uid),
-                                     parse_mode="HTML")
+            await app.bot.send_photo(
+                ADMIN_CHAT_ID, photo=photo,
+                caption=text, reply_markup=admin_ikb(uid),
+                parse_mode="HTML"
+            )
         else:
-            await app.bot.send_message(ADMIN_CHAT_ID, text,
-                                       reply_markup=admin_ikb(uid),
-                                       parse_mode="HTML")
+            await app.bot.send_message(
+                ADMIN_CHAT_ID, text,
+                reply_markup=admin_ikb(uid),
+                parse_mode="HTML"
+            )
     except Exception as e:
         logger.error(e)
 
@@ -124,7 +141,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     name = update.effective_user.full_name
     await update.message.reply_text(
-        f"Привет, {name}\n\n"
+        f"Привет, {name}!\n\n"
         "⚡ Авто-пополнение: 0%\n"
         "⚡ Авто-вывод: 0%\n"
         "🌟 Работаем: 24/7\n\n"
@@ -180,7 +197,6 @@ async def dep_casino(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def dep_id(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["dep_id"] = update.message.text
-    # Сразу просим ввести сумму — банки покажем ПОСЛЕ
     await update.message.reply_text(
         "🚀 Введите сумму пополнения:\n"
         "📌 Min: 100\n"
@@ -223,20 +239,21 @@ async def _process_deposit(update, ctx, amount, msg_obj):
         f"🎰 Казино: {casino}\n"
         f"🆔 ID: {casino_id}\n\n"
         "📌 Проверьте ваш ID ещё раз\n"
-        "❌ Отменить пополнение нельзя!!"
+        "❌ Отменить пополнение нельзя!!\n\n"
+        "🏦 Выберите банк для оплаты:"
     )
 
     # Показываем QR + банки для оплаты
     if qr_mode and pending_qr:
         await msg_obj.reply_photo(
             photo=pending_qr,
-            caption=caption + "\n\n🏦 Выберите банк для оплаты:",
+            caption=caption,
             parse_mode="HTML",
             reply_markup=dep_bank_payment_ikb()
         )
     else:
         await msg_obj.reply_text(
-            caption + "\n\n⚠️ QR не настроен. Используйте /qr чтобы загрузить QR-код.\n\n🏦 Выберите банк для оплаты:",
+            caption + "\n\n⚠️ QR не настроен. Используйте /qr чтобы загрузить QR-код.",
             parse_mode="HTML",
             reply_markup=dep_bank_payment_ikb()
         )
@@ -252,9 +269,21 @@ async def _process_deposit(update, ctx, amount, msg_obj):
     )
     await notify_admin(ctx.application, notif, uid)
 
-# недоступный банк — алерт
+# ── Банк при пополнении нажат → алерт + сообщение пользователю ────────────
 async def dep_bank_alert(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer("⛔ Данный банк недоступен!", show_alert=True)
+    q = update.callback_query
+    await q.answer("⛔ Данный банк недоступен!", show_alert=True)
+    # FIX: сообщаем пользователю что заявка принята
+    try:
+        await q.message.reply_text(
+            "✅ <b>Заявка на пополнение принята!</b>\n\n"
+            "⏳ Ожидайте — оператор свяжется с вами в ближайшее время.\n"
+            "💬 Поддержка: @aurapay_support_bot",
+            parse_mode="HTML",
+            reply_markup=main_kb()
+        )
+    except Exception as e:
+        logger.error(e)
 
 # ════════════════════════════════════════════════════════════════════════════
 #  ВЫВОД
@@ -302,6 +331,7 @@ async def wd_qr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message.photo:
         await update.message.reply_text("📷 Пожалуйста, отправьте именно фото QR кода.")
         return WD_QR
+    # FIX: сохраняем file_id правильно
     ctx.user_data["wd_qr"] = update.message.photo[-1].file_id
     casino = ctx.user_data.get("wd_casino", "")
     await update.message.reply_text(
@@ -327,7 +357,10 @@ async def wd_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await check.delete()
 
     await update.message.reply_text(
-        "✅ Заявка отправлена на рассмотр.\n⏳ Ожидайте ответа бота.",
+        "✅ <b>Заявка на вывод отправлена!</b>\n\n"
+        "⏳ Ожидайте — оператор обработает её в ближайшее время.\n"
+        "💬 Поддержка: @aurapay_support_bot",
+        parse_mode="HTML",
         reply_markup=main_kb()
     )
 
@@ -335,7 +368,7 @@ async def wd_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     bank   = ctx.user_data.get("wd_bank", "")
     phone  = ctx.user_data.get("wd_phone", "")
     cid    = ctx.user_data.get("wd_cid", "")
-    qr_fid = ctx.user_data.get("wd_qr", "")
+    qr_fid = ctx.user_data.get("wd_qr", "")  # FIX: берём file_id
 
     notif = (
         f"🆕 <b>ЗАЯВКА НА ВЫВОД</b>\n\n"
@@ -346,7 +379,8 @@ async def wd_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🎫 ID счёта: <code>{cid}</code>\n"
         f"🔑 Код: <code>{code}</code>"
     )
-    await notify_admin(ctx.application, notif, uid, photo=qr_fid or None)
+    # FIX: передаём qr_fid только если он есть (строка, не пустая)
+    await notify_admin(ctx.application, notif, uid, photo=qr_fid if qr_fid else None)
     return ConversationHandler.END
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -390,7 +424,6 @@ async def cmd_cob(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     parts = update.message.text.split(maxsplit=2)
     if len(parts) >= 3:
         try:
-            # Просто отправляем текст — без заголовка "от администратора"
             await ctx.bot.send_message(int(parts[1]), parts[2])
             await update.message.reply_text("✅ Сообщение отправлено!")
         except Exception as e:
@@ -412,30 +445,85 @@ async def cb_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     data = q.data
 
+    # noop — кнопка статуса, ничего не делаем
+    if data == "noop":
+        await q.answer()
+        return
+
     if data.startswith("approve_"):
         uid = int(data.split("approve_")[1])
         try:
-            await ctx.bot.send_message(uid, "✅ Ваша заявка одобрена!")
-        except:
-            pass
-        await q.answer("✅ Одобрено", show_alert=True)
+            await ctx.bot.send_message(
+                uid,
+                "✅ <b>Ваша заявка одобрена!</b>\n\nСредства будут зачислены в ближайшее время.",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(e)
+        # FIX: меняем кнопки — показываем статус "Одобрено"
+        try:
+            new_markup = admin_ikb(uid, status="approved")
+            if q.message.photo:
+                await q.message.edit_caption(
+                    caption=q.message.caption + "\n\n✅ <b>СТАТУС: ОДОБРЕНО</b>",
+                    parse_mode="HTML",
+                    reply_markup=new_markup
+                )
+            else:
+                await q.message.edit_text(
+                    text=q.message.text + "\n\n✅ <b>СТАТУС: ОДОБРЕНО</b>",
+                    parse_mode="HTML",
+                    reply_markup=new_markup
+                )
+        except Exception as e:
+            logger.error(e)
+        await q.answer("✅ Одобрено!")
 
     elif data.startswith("decline_"):
         uid = int(data.split("decline_")[1])
         try:
-            await ctx.bot.send_message(uid, "❌ Ваша заявка отклонена.")
-        except:
-            pass
-        await q.answer("❌ Отклонено", show_alert=True)
+            await ctx.bot.send_message(
+                uid,
+                "❌ <b>Ваша заявка отклонена.</b>\n\nЕсли есть вопросы — @aurapay_support_bot",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(e)
+        # FIX: меняем кнопки — показываем статус "Отклонено"
+        try:
+            new_markup = admin_ikb(uid, status="declined")
+            if q.message.photo:
+                await q.message.edit_caption(
+                    caption=q.message.caption + "\n\n❌ <b>СТАТУС: ОТКЛОНЕНО</b>",
+                    parse_mode="HTML",
+                    reply_markup=new_markup
+                )
+            else:
+                await q.message.edit_text(
+                    text=q.message.text + "\n\n❌ <b>СТАТУС: ОТКЛОНЕНО</b>",
+                    parse_mode="HTML",
+                    reply_markup=new_markup
+                )
+        except Exception as e:
+            logger.error(e)
+        await q.answer("❌ Отклонено!")
 
     elif data.startswith("ablock_"):
         uid = int(data.split("ablock_")[1])
         blocked_users.add(uid)
+        try:
+            await ctx.bot.send_message(uid, "🚫 Вы заблокированы в боте.")
+        except:
+            pass
         await q.answer(f"🚫 Пользователь {uid} заблокирован", show_alert=True)
 
     elif data.startswith("aunblock_"):
         uid = int(data.split("aunblock_")[1])
         blocked_users.discard(uid)
+        try:
+            await ctx.bot.send_message(uid, "✅ Ваш аккаунт разблокирован.")
+        except:
+            pass
         await q.answer(f"✅ Пользователь {uid} разблокирован", show_alert=True)
 
     elif data.startswith("awrite_"):
@@ -451,7 +539,6 @@ async def cb_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # ConversationHandler для пополнения
     dep_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^💰 Пополнить$"), dep_start)],
         states={
@@ -466,7 +553,6 @@ def main():
         allow_reentry=True,
     )
 
-    # ConversationHandler для вывода
     wd_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^💸 Вывести$"), wd_start)],
         states={
@@ -481,7 +567,6 @@ def main():
         allow_reentry=True,
     )
 
-    # ConversationHandler для /qr
     qr_conv = ConversationHandler(
         entry_points=[CommandHandler("qr", cmd_qr)],
         states={ADM_QR: [MessageHandler(filters.PHOTO | filters.TEXT, adm_set_qr)]},
@@ -497,9 +582,9 @@ def main():
     app.add_handler(MessageHandler(filters.Regex("^📖 Инструкция$"), cmd_instruction))
     app.add_handler(MessageHandler(filters.Regex("^🌐 Язык$"),       cmd_language))
     app.add_handler(MessageHandler(filters.Regex("^❌"),              cancel))
-    app.add_handler(CallbackQueryHandler(cb_lang,       pattern="^lang_"))
-    app.add_handler(CallbackQueryHandler(dep_bank_alert,pattern="^depbank_"))
-    app.add_handler(CallbackQueryHandler(cb_admin,      pattern="^(approve|decline|ablock|aunblock|awrite)_"))
+    app.add_handler(CallbackQueryHandler(cb_lang,        pattern="^lang_"))
+    app.add_handler(CallbackQueryHandler(dep_bank_alert, pattern="^depbank_"))
+    app.add_handler(CallbackQueryHandler(cb_admin,       pattern="^(approve|decline|ablock|aunblock|awrite|noop)"))
 
     logger.info("✅ Bot started!")
     app.run_polling(drop_pending_updates=True)
