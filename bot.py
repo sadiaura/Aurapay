@@ -906,48 +906,6 @@ async def dep_receipt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🧾 Чек: прикреплён"
     )
     await notify_admin(ctx.application, notif, uid, photo=receipt_fid)
-
-    # ── Начислить реферальный % пригласившему ─────────────────────────────
-    try:
-        amount_int = int(amount)
-    except:
-        amount_int = 0
-
-    if amount_int > 0:
-        ref_info = referral_data.get(uid, {})
-        referrer_id = ref_info.get("referrer")
-        if referrer_id and referrer_id in referral_data:
-            rdata = referral_data[referrer_id]
-
-            # Накапливаем суммарные пополнения реферала
-            old_total = rdata.get("total_dep", 0.0)
-            new_total = old_total + amount_int
-            rdata["total_dep"] = new_total
-
-            old_pct = get_ref_percent(old_total)
-            new_pct = get_ref_percent(new_total)
-            bonus   = amount_int * new_pct / 100
-            rdata["earned"] = rdata.get("earned", 0.0) + bonus
-
-            # Уведомление рефереру о пополнении
-            try:
-                tier_msg = ""
-                if new_pct > old_pct:
-                    tier_msg = f"\n\n🎉 <b>Ваш реферальный % вырос до {new_pct}%!</b>"
-
-                await ctx.bot.send_message(
-                    referrer_id,
-                    f"💸 <b>Ваш реферал пополнил счёт!</b>\n\n"
-                    f"💰 Сумма пополнения: <b>{amount_int} сом</b>\n"
-                    f"📊 Ваш %: <b>{new_pct}%</b>\n"
-                    f"✅ Начислено вам: <b>+{bonus:.2f} сом</b>\n"
-                    f"💼 Итого баланс: <b>{rdata['earned']:.2f} сом</b>"
-                    f"{tier_msg}",
-                    parse_mode="HTML"
-                )
-            except Exception as e:
-                logger.error(f"Не удалось уведомить реферера {referrer_id}: {e}")
-
     return ConversationHandler.END
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1182,6 +1140,41 @@ async def cb_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             all_requests[uid]["status"] = status
         if uid in pending_requests:
             del pending_requests[uid]
+
+        # ── Начислить реферальный % только при ОДОБРЕНИИ пополнения ──────
+        if is_approve and req.get("type") == "deposit":
+            try:
+                amount_int = int(req.get("amount", 0))
+            except:
+                amount_int = 0
+            if amount_int > 0:
+                ref_info = referral_data.get(uid, {})
+                referrer_id = ref_info.get("referrer")
+                if referrer_id and referrer_id in referral_data:
+                    rdata = referral_data[referrer_id]
+                    old_total = rdata.get("total_dep", 0.0)
+                    new_total = old_total + amount_int
+                    rdata["total_dep"] = new_total
+                    old_pct = get_ref_percent(old_total)
+                    new_pct = get_ref_percent(new_total)
+                    bonus   = amount_int * new_pct / 100
+                    rdata["earned"] = rdata.get("earned", 0.0) + bonus
+                    try:
+                        tier_msg = ""
+                        if new_pct > old_pct:
+                            tier_msg = f"\n\n🎉 <b>Ваш реферальный % вырос до {new_pct}%!</b>"
+                        await ctx.bot.send_message(
+                            referrer_id,
+                            f"💸 <b>Ваш реферал пополнил счёт!</b>\n\n"
+                            f"💰 Сумма пополнения: <b>{amount_int} сом</b>\n"
+                            f"📊 Ваш %: <b>{new_pct}%</b>\n"
+                            f"✅ Начислено вам: <b>+{bonus:.2f} сом</b>\n"
+                            f"💼 Итого баланс: <b>{rdata['earned']:.2f} сом</b>"
+                            f"{tier_msg}",
+                            parse_mode="HTML"
+                        )
+                    except Exception as e:
+                        logger.error(f"Не удалось уведомить реферера {referrer_id}: {e}")
 
         status_text = "✅ СТАТУС: ОДОБРЕНО" if is_approve else "❌ СТАТУС: ОТКЛОНЕНО"
         try:
