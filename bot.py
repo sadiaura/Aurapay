@@ -18,15 +18,46 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN     = os.getenv("BOT_TOKEN", "")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 ADMIN_IDS     = list(map(int, os.getenv("ADMIN_IDS", "0").split(",")))
+BOT_USERNAME  = os.getenv("BOT_USERNAME", "YourBot")  # без @, напр. AuraPayBot
 
 blocked_users = set()
 qr_mode       = False
-pending_qr    = None  # file_id QR
-bot_paused    = False  # режим паузы — пользователи видят заглушку
+pending_qr    = None
+bot_paused    = False
 
 pending_requests: dict = {}
-# История заявок для /zayavki: uid -> {..., "username", "status": "pending"}
-all_requests:  dict = {}
+all_requests:     dict = {}
+
+# ─── Реферальная система ─────────────────────────────────────────────────────
+# referral_data[uid] = {
+#   "referrer": int | None,      — кто пригласил
+#   "referrals": [uid, ...],     — кого пригласил сам
+#   "earned": float,             — всего заработано сомов
+#   "total_dep": float,          — суммарное пополнение рефералов (для уровня %)
+# }
+referral_data: dict = {}
+
+# Уровни процента по сумме пополнений реферала
+REFERRAL_TIERS = [
+    (100_000, 10),
+    (50_000,   6),
+    (30_000,   5),
+    (10_000,   4),
+    (0,        3),
+]
+
+def get_ref_percent(total_dep: float) -> int:
+    for threshold, pct in REFERRAL_TIERS:
+        if total_dep >= threshold:
+            return pct
+    return 3
+
+# Вывод реферальных: мин 150, макс 100 000
+REF_WD_MIN = 150
+REF_WD_MAX = 100_000
+
+# Состояния для вывода реферальных
+REF_WD_CASINO, REF_WD_ID, REF_WD_AMOUNT = range(20, 23)
 
 (
     DEP_CASINO, DEP_ID, DEP_AMOUNT, DEP_BANK, DEP_RECEIPT,
@@ -59,7 +90,8 @@ def track(ctx: ContextTypes.DEFAULT_TYPE, *msg_ids, key: str = "cleanup_ids"):
 def main_kb():
     return ReplyKeyboardMarkup(
         [[KeyboardButton("💰 Пополнить"), KeyboardButton("💸 Вывести")],
-         [KeyboardButton("📖 Инструкция"), KeyboardButton("🌐 Язык")]],
+         [KeyboardButton("🤝 Реферальная"), KeyboardButton("📖 Инструкция")],
+         [KeyboardButton("🌐 Язык")]],
         resize_keyboard=True
     )
 
@@ -69,6 +101,14 @@ def casino_ikb(prefix):
         [InlineKeyboardButton("🎰 Melbet",  callback_data=f"{prefix}_Melbet"),
          InlineKeyboardButton("🎰 1win",    callback_data=f"{prefix}_1win")],
         [InlineKeyboardButton("🎰 mostbet", callback_data=f"{prefix}_mostbet")],
+    ])
+
+# Казино для вывода реферальных (только хбет и мелбет)
+def ref_casino_ikb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("1️⃣ 1xBet",  callback_data="refwd_casino_1xBet")],
+        [InlineKeyboardButton("🎰 Melbet",  callback_data="refwd_casino_Melbet")],
+        [InlineKeyboardButton("❌ Отменить", callback_data="refwd_cancel")],
     ])
 
 def amount_ikb():
@@ -124,6 +164,16 @@ def admin_ikb(uid, status=None):
         [InlineKeyboardButton("✍️ Написать",       callback_data=f"awrite_{uid}"),
          InlineKeyboardButton("🚫 Заблокировать",  callback_data=f"ablock_{uid}")],
         [InlineKeyboardButton("🔓 Разблокировать", callback_data=f"aunblock_{uid}")],
+    ])
+
+# ── Реферальное меню ──────────────────────────────────────────────────────
+def ref_menu_ikb(uid: int):
+    data = referral_data.get(uid, {})
+    earned = data.get("earned", 0.0)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💸 Вывести реферальные", callback_data="ref_withdraw")],
+        [InlineKeyboardButton("🔗 Поделиться ссылкой",  callback_data="ref_share")],
+        [InlineKeyboardButton("🏆 Топ-10 рефереров",    callback_data="ref_top10")],
     ])
 
 def build_status_msg(uid: int, status: str, elapsed_sec: int) -> str:
@@ -198,6 +248,8 @@ async def cmd_commands(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Пример: /cob 123456789 Ваша заявка одобрена!\n\n"
         "📸 <b>QR-код</b>\n"
         "/qr — загрузить новый QR-код для оплаты\n\n"
+        "🤝 <b>Реферальная статистика</b>\n"
+        "/refstats — топ рефереров и общая статистика\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "💡 Одобрить/отклонить заявку можно прямо под сообщением заявки кнопками.",
         parse_mode="HTML"
@@ -286,10 +338,30 @@ async def cmd_zayavki(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 # ════════════════════════════════════════════════════════════════════════════
+#  /refstats — реферальная статистика (для админа)
+# ════════════════════════════════════════════════════════════════════════════
+async def cmd_refstats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    if not referral_data:
+        await update.message.reply_text("📊 Реферальных данных пока нет.")
+        return
+    sorted_users = sorted(referral_data.items(), key=lambda x: x[1].get("earned", 0), reverse=True)
+    lines = ["🏆 <b>Топ рефереров (все)</b>\n"]
+    for i, (uid, data) in enumerate(sorted_users[:20], 1):
+        earned   = data.get("earned", 0)
+        refs_cnt = len(data.get("referrals", []))
+        pct      = get_ref_percent(data.get("total_dep", 0))
+        lines.append(f"{i}. 🆔<code>{uid}</code> | 👥{refs_cnt} реф | 💰{earned:.0f} сом | {pct}%")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+# ════════════════════════════════════════════════════════════════════════════
 #  /start
 # ════════════════════════════════════════════════════════════════════════════
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
+    uid  = update.effective_user.id
+    args = ctx.args  # параметры после /start
+
     if uid in blocked_users:
         await update.message.reply_text("❌ Вы заблокированы.")
         return ConversationHandler.END
@@ -302,6 +374,43 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
         return ConversationHandler.END
+
+    # ── Обработка реферальной ссылки ──────────────────────────────────────
+    if args and args[0].startswith("ref"):
+        try:
+            referrer_id = int(args[0][3:])
+            if referrer_id != uid and uid not in referral_data:
+                # Регистрируем нового пользователя под рефером
+                if uid not in referral_data:
+                    referral_data[uid] = {"referrer": referrer_id, "referrals": [], "earned": 0.0, "total_dep": 0.0}
+                else:
+                    referral_data[uid]["referrer"] = referrer_id
+
+                # Добавляем реферала к пригласившему
+                if referrer_id not in referral_data:
+                    referral_data[referrer_id] = {"referrer": None, "referrals": [], "earned": 0.0, "total_dep": 0.0}
+                if uid not in referral_data[referrer_id]["referrals"]:
+                    referral_data[referrer_id]["referrals"].append(uid)
+
+                # Уведомляем пригласившего
+                try:
+                    ref_name = update.effective_user.full_name
+                    await ctx.bot.send_message(
+                        referrer_id,
+                        f"🎉 <b>У вас новый реферал!</b>\n\n"
+                        f"👤 {ref_name} зарегистрировался по вашей ссылке.\n"
+                        f"💡 Вы будете получать % с каждого его пополнения!",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+        except ValueError:
+            pass
+
+    # Инициализируем реферальные данные если нет
+    if uid not in referral_data:
+        referral_data[uid] = {"referrer": None, "referrals": [], "earned": 0.0, "total_dep": 0.0}
+
     name = update.effective_user.full_name
     await update.message.reply_text(
         f"Привет, {name}!\n\n"
@@ -342,6 +451,252 @@ async def cb_lang(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer("✅ Язык выбран")
 
 # ════════════════════════════════════════════════════════════════════════════
+#  РЕФЕРАЛЬНЫЙ РАЗДЕЛ
+# ════════════════════════════════════════════════════════════════════════════
+async def cmd_referral(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid  = update.effective_user.id
+    if uid in blocked_users:
+        await update.message.reply_text("❌ Вы заблокированы.")
+        return
+    if uid not in referral_data:
+        referral_data[uid] = {"referrer": None, "referrals": [], "earned": 0.0, "total_dep": 0.0}
+
+    data     = referral_data[uid]
+    earned   = data.get("earned", 0.0)
+    refs_cnt = len(data.get("referrals", []))
+    total_d  = data.get("total_dep", 0.0)
+    pct      = get_ref_percent(total_d)
+
+    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref{uid}"
+
+    # Следующий уровень
+    next_tier_txt = ""
+    for threshold, p in sorted(REFERRAL_TIERS, key=lambda x: x[0]):
+        if total_d < threshold:
+            next_tier_txt = f"📈 До {p}%: пополнить ещё <b>{threshold - total_d:.0f} сом</b>\n"
+            break
+
+    await update.message.reply_text(
+        f"🤝 <b>Реферальная программа</b>\n\n"
+        f"🔗 Ваша ссылка:\n<code>{ref_link}</code>\n\n"
+        f"👥 Приглашено рефералов: <b>{refs_cnt}</b>\n"
+        f"💰 Заработано: <b>{earned:.2f} сом</b>\n"
+        f"📊 Ваш % с пополнений: <b>{pct}%</b>\n\n"
+        f"{next_tier_txt}"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 <b>Уровни реферального %:</b>\n"
+        f"  • Базовый: 3%\n"
+        f"  • Рефералы пополнили 10к+: 4%\n"
+        f"  • 30к+: 5%\n"
+        f"  • 50к+: 6%\n"
+        f"  • 100к+: 10%\n\n"
+        f"Приглашай друзей, пополняй и зарабатывай!",
+        parse_mode="HTML",
+        reply_markup=ref_menu_ikb(uid)
+    )
+
+# ── Callback кнопок реферального меню ─────────────────────────────────────
+async def cb_ref_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q   = update.callback_query
+    uid = update.effective_user.id
+    await q.answer()
+
+    if q.data == "ref_share":
+        ref_link = f"https://t.me/{BOT_USERNAME}?start=ref{uid}"
+        share_text = (
+            f"💰 Пополняй и выводи деньги на букмекерах через AuraPay!\n"
+            f"Быстро, надёжно, 24/7.\n\n"
+            f"👉 {ref_link}"
+        )
+        # Кнопка для шаринга через telegram
+        share_url = f"https://t.me/share/url?url={ref_link}&text=Пополняй+и+выводи+через+AuraPay!"
+        await q.message.reply_text(
+            f"📤 <b>Поделитесь своей ссылкой:</b>\n\n"
+            f"<code>{ref_link}</code>\n\n"
+            f"Скопируйте ссылку или нажмите кнопку ниже👇",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📲 Поделиться", url=share_url)],
+                [InlineKeyboardButton("◀️ Назад", callback_data="ref_back")],
+            ])
+        )
+
+    elif q.data == "ref_top10":
+        sorted_users = sorted(
+            referral_data.items(),
+            key=lambda x: x[1].get("earned", 0),
+            reverse=True
+        )
+        medals = ["🥇", "🥈", "🥉"]
+        lines = ["🏆 <b>Топ-10 по реферальным заработкам</b>\n"]
+        for i, (u_id, udata) in enumerate(sorted_users[:10], 1):
+            earned   = udata.get("earned", 0)
+            refs_cnt = len(udata.get("referrals", []))
+            medal    = medals[i-1] if i <= 3 else f"{i}."
+            # Показываем анонимно (только первые 4 цифры ID)
+            anon_id  = str(u_id)[:4] + "****"
+            lines.append(f"{medal} ID {anon_id} | 👥{refs_cnt} | 💰{earned:.0f} сом")
+
+        if len(sorted_users) == 0:
+            lines.append("Пока никто не заработал реферальных 😔")
+
+        # Позиция текущего пользователя
+        my_rank = next((i+1 for i, (u, _) in enumerate(sorted_users) if u == uid), None)
+        if my_rank and my_rank > 10:
+            lines.append(f"\n📌 Ваша позиция: #{my_rank}")
+
+        await q.message.reply_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="ref_back")]])
+        )
+
+    elif q.data == "ref_withdraw":
+        data   = referral_data.get(uid, {})
+        earned = data.get("earned", 0.0)
+        if earned < REF_WD_MIN:
+            await q.answer(
+                f"❌ Недостаточно средств!\nМинимум для вывода: {REF_WD_MIN} сом\nВаш баланс: {earned:.2f} сом",
+                show_alert=True
+            )
+            return
+        # Начинаем диалог вывода
+        ctx.user_data["refwd_balance"] = earned
+        await q.message.reply_text(
+            f"💸 <b>Вывод реферального заработка</b>\n\n"
+            f"💰 Ваш баланс: <b>{earned:.2f} сом</b>\n"
+            f"📌 Мин. вывод: {REF_WD_MIN} сом\n"
+            f"📌 Макс. вывод: {REF_WD_MAX:,} сом\n\n"
+            f"🎰 Выберите букмекер для вывода:",
+            parse_mode="HTML",
+            reply_markup=ref_casino_ikb()
+        )
+        return REF_WD_CASINO
+
+    elif q.data == "ref_back":
+        data     = referral_data.get(uid, {})
+        earned   = data.get("earned", 0.0)
+        refs_cnt = len(data.get("referrals", []))
+        total_d  = data.get("total_dep", 0.0)
+        pct      = get_ref_percent(total_d)
+        ref_link = f"https://t.me/{BOT_USERNAME}?start=ref{uid}"
+        await q.message.edit_text(
+            f"🤝 <b>Реферальная программа</b>\n\n"
+            f"🔗 Ваша ссылка:\n<code>{ref_link}</code>\n\n"
+            f"👥 Приглашено рефералов: <b>{refs_cnt}</b>\n"
+            f"💰 Заработано: <b>{earned:.2f} сом</b>\n"
+            f"📊 Ваш % с пополнений: <b>{pct}%</b>\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💡 <b>Уровни реферального %:</b>\n"
+            f"  • Базовый: 3%\n"
+            f"  • 10к+: 4% | 30к+: 5% | 50к+: 6% | 100к+: 10%",
+            parse_mode="HTML",
+            reply_markup=ref_menu_ikb(uid)
+        )
+
+# ════════════════════════════════════════════════════════════════════════════
+#  ВЫВОД РЕФЕРАЛЬНЫХ — ConversationHandler
+# ════════════════════════════════════════════════════════════════════════════
+async def refwd_casino(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if q.data == "refwd_cancel":
+        await q.message.reply_text("❌ Вывод отменён.", reply_markup=main_kb())
+        return ConversationHandler.END
+    casino = q.data.replace("refwd_casino_", "")
+    ctx.user_data["refwd_casino"] = casino
+    balance = ctx.user_data.get("refwd_balance", 0)
+    await q.edit_message_text(
+        f"🎰 Букмекер: <b>{casino}</b>\n\n"
+        f"💰 Ваш баланс: <b>{balance:.2f} сом</b>\n\n"
+        f"🆔 Введите ваш ID на {casino}:",
+        parse_mode="HTML"
+    )
+    return REF_WD_ID
+
+async def refwd_id(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["refwd_id"] = update.message.text.strip()
+    balance = ctx.user_data.get("refwd_balance", 0)
+    await update.message.reply_text(
+        f"💰 Доступно для вывода: <b>{balance:.2f} сом</b>\n"
+        f"📌 Мин: {REF_WD_MIN} | Макс: {REF_WD_MAX:,}\n\n"
+        f"✏️ Введите сумму вывода:",
+        parse_mode="HTML"
+    )
+    return REF_WD_AMOUNT
+
+async def refwd_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid     = update.effective_user.id
+    txt     = update.message.text.strip()
+    balance = ctx.user_data.get("refwd_balance", 0.0)
+
+    if not txt.replace(".", "").isdigit():
+        await update.message.reply_text("⚠️ Введите корректную сумму (число).")
+        return REF_WD_AMOUNT
+
+    amount = float(txt)
+
+    if amount < REF_WD_MIN:
+        await update.message.reply_text(
+            f"⚠️ Минимальная сумма вывода: <b>{REF_WD_MIN} сом</b>",
+            parse_mode="HTML"
+        )
+        return REF_WD_AMOUNT
+
+    if amount > REF_WD_MAX:
+        await update.message.reply_text(
+            f"⚠️ Максимальная сумма вывода: <b>{REF_WD_MAX:,} сом</b>",
+            parse_mode="HTML"
+        )
+        return REF_WD_AMOUNT
+
+    if amount > balance:
+        await update.message.reply_text(
+            f"❌ Недостаточно средств!\n💰 Ваш баланс: <b>{balance:.2f} сом</b>",
+            parse_mode="HTML"
+        )
+        return REF_WD_AMOUNT
+
+    casino = ctx.user_data.get("refwd_casino", "—")
+    acc_id = ctx.user_data.get("refwd_id", "—")
+
+    await update.message.reply_text(
+        f"✅ <b>Заявка на вывод реферального заработка отправлена!</b>\n\n"
+        f"🎰 Букмекер: {casino}\n"
+        f"🆔 ID: {acc_id}\n"
+        f"💰 Сумма: {amount:.2f} сом\n\n"
+        f"⏳ Ожидайте обработки оператором.",
+        parse_mode="HTML",
+        reply_markup=main_kb()
+    )
+
+    # Уведомление админу
+    notif = (
+        f"💸 <b>ВЫВОД РЕФЕРАЛЬНОГО ЗАРАБОТКА</b>\n\n"
+        f"👤 <a href='tg://user?id={uid}'>{update.effective_user.full_name}</a>\n"
+        f"🆔 Chat ID: <code>{uid}</code>\n"
+        f"🎰 Букмекер: {casino}\n"
+        f"🎫 ID счёта: <code>{acc_id}</code>\n"
+        f"💰 Сумма: {amount:.2f} сом\n"
+        f"📊 Баланс до вывода: {balance:.2f} сом"
+    )
+    if ADMIN_CHAT_ID:
+        try:
+            await ctx.bot.send_message(
+                ADMIN_CHAT_ID, notif,
+                reply_markup=admin_ikb(uid),
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(e)
+
+    return ConversationHandler.END
+
+async def refwd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Операция отменена.", reply_markup=main_kb())
+    return ConversationHandler.END
+
+# ════════════════════════════════════════════════════════════════════════════
 #  ПОПОЛНЕНИЕ
 # ════════════════════════════════════════════════════════════════════════════
 async def dep_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -358,7 +713,6 @@ async def dep_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
         return ConversationHandler.END
-    # Проверка активной заявки
     active = all_requests.get(uid)
     if active and active.get("status") == "pending":
         req_type = "пополнение" if active.get("type") == "deposit" else "вывод"
@@ -489,7 +843,6 @@ async def dep_bank_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await safe_delete(hint.bot, update.effective_user.id, hint.message_id)
     return DEP_BANK
 
-# ── Отмена через inline-кнопку на QR ─────────────────────────────────────
 async def dep_cancel_inline(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer("❌ Операция отменена")
@@ -553,6 +906,48 @@ async def dep_receipt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🧾 Чек: прикреплён"
     )
     await notify_admin(ctx.application, notif, uid, photo=receipt_fid)
+
+    # ── Начислить реферальный % пригласившему ─────────────────────────────
+    try:
+        amount_int = int(amount)
+    except:
+        amount_int = 0
+
+    if amount_int > 0:
+        ref_info = referral_data.get(uid, {})
+        referrer_id = ref_info.get("referrer")
+        if referrer_id and referrer_id in referral_data:
+            rdata = referral_data[referrer_id]
+
+            # Накапливаем суммарные пополнения реферала
+            old_total = rdata.get("total_dep", 0.0)
+            new_total = old_total + amount_int
+            rdata["total_dep"] = new_total
+
+            old_pct = get_ref_percent(old_total)
+            new_pct = get_ref_percent(new_total)
+            bonus   = amount_int * new_pct / 100
+            rdata["earned"] = rdata.get("earned", 0.0) + bonus
+
+            # Уведомление рефереру о пополнении
+            try:
+                tier_msg = ""
+                if new_pct > old_pct:
+                    tier_msg = f"\n\n🎉 <b>Ваш реферальный % вырос до {new_pct}%!</b>"
+
+                await ctx.bot.send_message(
+                    referrer_id,
+                    f"💸 <b>Ваш реферал пополнил счёт!</b>\n\n"
+                    f"💰 Сумма пополнения: <b>{amount_int} сом</b>\n"
+                    f"📊 Ваш %: <b>{new_pct}%</b>\n"
+                    f"✅ Начислено вам: <b>+{bonus:.2f} сом</b>\n"
+                    f"💼 Итого баланс: <b>{rdata['earned']:.2f} сом</b>"
+                    f"{tier_msg}",
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.error(f"Не удалось уведомить реферера {referrer_id}: {e}")
+
     return ConversationHandler.END
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -572,7 +967,6 @@ async def wd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
         return ConversationHandler.END
-    # Проверка активной заявки
     active = all_requests.get(uid)
     if active and active.get("status") == "pending":
         req_type = "пополнение" if active.get("type") == "deposit" else "вывод"
@@ -591,6 +985,8 @@ async def wd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
     await cleanup_msgs(ctx, uid)
+    ctx.user_data.clear()
+    msg = await update.message.reply_text("🎰 Выберите букмекер:", reply_markup=casino_ikb("wd"))
     track(ctx, update.message.message_id, msg.message_id)
     return WD_CASINO
 
@@ -659,7 +1055,6 @@ async def wd_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     phone  = ctx.user_data.get("wd_phone", "")
     cid    = ctx.user_data.get("wd_cid", "")
     qr_fid = ctx.user_data.get("wd_qr", "")
-
 
     check = await update.message.reply_text("🔍 Проверяю код...")
     await asyncio.sleep(random.uniform(1, 2))
@@ -783,7 +1178,6 @@ async def cb_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Не удалось отправить статус пользователю {uid}: {e}")
 
-        # Снимаем заявку с ожидания
         if uid in all_requests:
             all_requests[uid]["status"] = status
         if uid in pending_requests:
@@ -890,19 +1284,35 @@ def main():
         allow_reentry=True,
     )
 
-    app.add_handler(CommandHandler("start",    cmd_start))
-    app.add_handler(CommandHandler("cob",      cmd_cob))
-    app.add_handler(CommandHandler("commands", cmd_commands))
-    app.add_handler(CommandHandler("status",   cmd_status))
-    app.add_handler(CommandHandler("zayavki",  cmd_zayavki))
+    # Вывод реферальных — ConversationHandler
+    refwd_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_ref_menu, pattern="^ref_withdraw$")],
+        states={
+            REF_WD_CASINO: [CallbackQueryHandler(refwd_casino, pattern="^refwd_")],
+            REF_WD_ID:     [MessageHandler(filters.TEXT & ~filters.COMMAND, refwd_id)],
+            REF_WD_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, refwd_amount)],
+        },
+        fallbacks=[MessageHandler(filters.Regex("^❌"), refwd_cancel)],
+        allow_reentry=True,
+    )
+
+    app.add_handler(CommandHandler("start",     cmd_start))
+    app.add_handler(CommandHandler("cob",       cmd_cob))
+    app.add_handler(CommandHandler("commands",  cmd_commands))
+    app.add_handler(CommandHandler("status",    cmd_status))
+    app.add_handler(CommandHandler("zayavki",   cmd_zayavki))
+    app.add_handler(CommandHandler("refstats",  cmd_refstats))
     app.add_handler(qr_conv)
     app.add_handler(dep_conv)
     app.add_handler(wd_conv)
+    app.add_handler(refwd_conv)
+    app.add_handler(MessageHandler(filters.Regex("^🤝 Реферальная$"), cmd_referral))
     app.add_handler(MessageHandler(filters.Regex("^📖 Инструкция$"), cmd_instruction))
     app.add_handler(MessageHandler(filters.Regex("^🌐 Язык$"),       cmd_language))
     app.add_handler(MessageHandler(filters.Regex("^❌"),              cancel))
     app.add_handler(CallbackQueryHandler(cb_lang,      pattern="^lang_"))
     app.add_handler(CallbackQueryHandler(cb_bot_pause, pattern="^bot_(pause|resume)$"))
+    app.add_handler(CallbackQueryHandler(cb_ref_menu,  pattern="^ref_(share|top10|back)$"))
     app.add_handler(CallbackQueryHandler(cb_admin,     pattern="^(approve|decline|ablock|aunblock|awrite|noop)"))
 
     logger.info("✅ Bot started!")
